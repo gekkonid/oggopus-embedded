@@ -50,10 +50,7 @@ impl ParseCallbacks for ParseCallback {
                 let mut comment = comment
                     .replace("[`opus_errorcodes`]", "opus error codes")
                     .replace("#OPUS_RESET_STATE", "`OPUS_RESET_STATE`")
-                    .replace(
-                        "@retval #OPUS_OK",
-                        "\n\n\n# Returns\n\n@retval #OPUS_OK",
-                    )
+                    .replace("@retval #OPUS_OK", "\n\n\n# Returns\n\n@retval #OPUS_OK")
                     .replace(
                         "@retval OPUS_BANDWIDTH_NARROW",
                         "\n\n# Returns\n\n@retval OPUS_BANDWIDTH_NARROW",
@@ -103,6 +100,16 @@ fn main() {
 
     // Run autoreconf and configure in the new directory
     let mut builder = autotools::Config::new(target);
+    let target_triple = env::var("TARGET").unwrap();
+    let compiler_prefix = if target_triple.ends_with("-none-elf") {
+        format!("{}-elf", target_triple.trim_end_matches("-none-elf"))
+    } else if target_triple.ends_with("-unknown-elf") {
+        format!("{}-elf", target_triple.trim_end_matches("-unknown-elf"))
+    } else {
+        target_triple.clone()
+    };
+    let is_xtensa = target_triple.starts_with("xtensa-");
+
     builder
         .reconf("-ivf")
         .disable("deep-plc", None)
@@ -111,13 +118,13 @@ fn main() {
         .disable("extra-programs", None)
         .disable("float-api", None)
         .enable("fixed-point", None);
-    if env::var("TARGET").unwrap().starts_with("thumbv6m-") {
+    if target_triple.starts_with("thumbv6m-") {
         // No assembly implementation without SMULL (32-bit multiply with 64-bit result)
         // instruction that does not exist on Cortex-{M0,M0+,M1} (thumbv6m).
         // However optimizations seem to do a reasonable job here.
         builder.disable("asm", None);
     }
-    if env::var("TARGET").unwrap().starts_with("thumbv7m-") {
+    if target_triple.starts_with("thumbv7m-") {
         // Fails on Cortex-M3 (thumbv7m), disable CPU detection on embedded
         builder.disable("rtcd", None);
     }
@@ -130,9 +137,25 @@ fn main() {
             .cflag(format!("-I{}", src_path.to_str().unwrap()))
             .ldflag("-nostdlib");
     }
-    if cfg!(feature = "optimize_libopus") {
+    if is_xtensa {
+        println!(
+            "cargo:warning=Building for xtensa, ignoring optimize_libopus, will be always -O2"
+        );
+        builder
+            .cflag("-O2")
+            .cflag("-mlongcalls")
+            .cxxflag("-mlongcalls")
+            .env("CC", format!("{}-gcc", compiler_prefix))
+            .cflag("-fno-schedule-insns") /* causes audio artifacts */;
+        /* If you ever need to chase a compiler bug like this, here's some shell hackery:
+          xtensa-esp32s2-elf-gcc -Q --help=optimizers -O1 | sort > /tmp/O1.txt
+          xtensa-esp32s2-elf-gcc -Q --help=optimizers -O2 | sort > /tmp/O2.txt
+          diff -u /tmp/O1.txt /tmp/O2.txt | sed -E 's/^\+  -f([^ ]+) .*$/.cflag("-fno-\1")/; t; d'
+        */
+    } else if cfg!(feature = "optimize_libopus") {
         builder.cflag("-O3");
     }
+
     let dst = builder.build();
     println!(
         "cargo:rustc-link-search=native={}",
