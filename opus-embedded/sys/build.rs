@@ -101,14 +101,6 @@ fn main() {
     // Run autoreconf and configure in the new directory
     let mut builder = autotools::Config::new(target);
     let target_triple = env::var("TARGET").unwrap();
-    let compiler_prefix = if target_triple.ends_with("-none-elf") {
-        format!("{}-elf", target_triple.trim_end_matches("-none-elf"))
-    } else if target_triple.ends_with("-unknown-elf") {
-        format!("{}-elf", target_triple.trim_end_matches("-unknown-elf"))
-    } else {
-        target_triple.clone()
-    };
-    let is_xtensa = target_triple.starts_with("xtensa-");
 
     builder
         .reconf("-ivf")
@@ -137,23 +129,34 @@ fn main() {
             .cflag(format!("-I{}", src_path.to_str().unwrap()))
             .ldflag("-nostdlib");
     }
-    if is_xtensa {
-        println!(
-            "cargo:warning=Building for xtensa, ignoring optimize_libopus, will be always -O2"
-        );
+
+    let mut override_optimization = cfg!(feature = "optimize_libopus");
+    let mut optimization_level = "3".to_string();
+
+    if target_triple.starts_with("xtensa-") {
+        let compiler_prefix = if target_triple.ends_with("-none-elf") {
+            format!("{}-elf", target_triple.trim_end_matches("-none-elf"))
+        } else if target_triple.ends_with("-unknown-elf") {
+            format!("{}-elf", target_triple.trim_end_matches("-unknown-elf"))
+        } else {
+            target_triple.clone()
+        };
+
+        // override: -O3 is slower than -O2 on xtensa
+        optimization_level = "2".to_string();
+        if env::var("OPT_LEVEL").expect("OPT_LEVEL not set") == "3" {
+            // bring the OPT_LEVEL down to 2
+            override_optimization = true;
+        }
+
         builder
-            .cflag("-O2")
             .cflag("-mlongcalls")
-            .cxxflag("-mlongcalls")
             .env("CC", format!("{}-gcc", compiler_prefix))
-            .cflag("-fno-schedule-insns") /* causes audio artifacts */;
-        /* If you ever need to chase a compiler bug like this, here's some shell hackery:
-          xtensa-esp32s2-elf-gcc -Q --help=optimizers -O1 | sort > /tmp/O1.txt
-          xtensa-esp32s2-elf-gcc -Q --help=optimizers -O2 | sort > /tmp/O2.txt
-          diff -u /tmp/O1.txt /tmp/O2.txt | sed -E 's/^\+  -f([^ ]+) .*$/.cflag("-fno-\1")/; t; d'
-        */
-    } else if cfg!(feature = "optimize_libopus") {
-        builder.cflag("-O3");
+            .cflag("-fno-schedule-insns") /* enabling schedule-insns causes audio artifacts */;
+    }
+
+    if override_optimization {
+        builder.cflag(format!("-O{}", optimization_level));
     }
 
     let dst = builder.build();
