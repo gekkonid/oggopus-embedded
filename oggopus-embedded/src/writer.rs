@@ -120,10 +120,13 @@ fn write_ogg_page(
 ) -> Result<usize, OggWriteError> {
     // Build segment table
     let packet_len = packet.len();
+    // Ogg requires segments of 0-254 bytes; 255 means "continued on next segment".
+    // When the remaining data is exactly 255 bytes we need two segments:
+    // [255, 0] — the zero terminates the packet.
     let seg_count = if packet_len == 0 {
         1
     } else {
-        (packet_len + 254) / 255
+        (packet_len + 255) / 255
     };
     if seg_count > 255 {
         return Err(OggWriteError::InvalidInput("packet too large for one page"));
@@ -157,13 +160,22 @@ fn write_ogg_page(
         pos += 1;
         remaining -= 255;
     }
-    if packet_len > 0 {
-        out[pos] = remaining as u8;
-        pos += 1;
-    } else {
+    if packet_len == 0 {
         // Zero-length packet: single 0 segment
         out[pos] = 0;
         pos += 1;
+    } else {
+        out[pos] = remaining as u8;
+        pos += 1;
+        // If the last data chunk fills a segment exactly (255 bytes),
+        // add a zero segment to terminate the packet.  Without this
+        // the demuxer believes the packet continues on the next page
+        // and opusinfo reports "no completed packets" and undercounts
+        // the sample count by one frame per affected page.
+        if remaining == 255 {
+            out[pos] = 0;
+            pos += 1;
+        }
     }
 
     // Write packet data
