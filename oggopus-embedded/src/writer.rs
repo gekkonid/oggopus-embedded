@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Tomi Leppänen
+ * Copyright (c) 2026 Gekkonid Scientfic
  * SPDX-License-Identifier: BSD-3-Clause
  */
 //! Ogg Opus serialisation.
@@ -122,7 +122,7 @@ fn write_ogg_page(
     let packet_len = packet.len();
     // Ogg requires segments of 0-254 bytes; 255 means "continued on next segment".
     // When the remaining data is exactly 255 bytes we need two segments:
-    // [255, 0] — the zero terminates the packet.
+    // [255, 0] (the zero terminates the packet)
     let seg_count = if packet_len == 0 {
         1
     } else {
@@ -483,15 +483,16 @@ mod tests {
 
     #[test]
     fn write_multiple_packets_tracks_granule() {
+        let pre_skip = 3840u64;
         let header = OpusHeader {
             version: 1,
             channels: ChannelMapping::Family0 { channels: 1 },
-            pre_skip: 3840,
+            pre_skip: pre_skip as u16,
             sample_rate: 48000,
             output_gain: 0,
         };
 
-        let mut writer = OggWriter::new(1, 3840);
+        let mut writer = OggWriter::new(1, pre_skip as u16);
         let mut buf = [0u8; 4096];
         let mut off = 0;
 
@@ -501,35 +502,38 @@ mod tests {
         off += writer.write_packet(b"packet-b", 480, false, &mut buf[off..]).unwrap();
         let _ = writer.write_packet(b"packet-c", 960, true, &mut buf[off..]).unwrap();
 
+        let hdr_len = 28usize;
+
         // Check granule positions
-        // Page 2: pre_skip + 960 = 4800
         let mut pos = 0;
         pos += {
-            let seg = buf[27] as usize;
-            28 + seg
+            let seg = buf[hdr_len - 1] as usize;
+            hdr_len + seg
         };
+
+        // Page 2: just first packet =  960
         pos += {
             // Page 1
-            let seg = buf[pos + 27] as usize;
-            28 + seg
+            let seg = buf[pos + hdr_len - 1] as usize;
+            hdr_len + seg
         };
-        // Page 2 (audio) — no pre_skip
         let g2 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
         assert_eq!(g2, 960);
 
-        // Page 3 (audio) — no pre_skip
-        let seg3 = buf[pos + 27] as usize;
+        // Page 3: first two packets = 960 + 480
+        let seg3 = buf[pos + hdr_len - 1] as usize;
         let p3_start = pos;
-        pos += 28 + seg3;
+        pos += hdr_len + seg3;
         let g3 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
         assert_eq!(g3, 960 + 480);
 
-        // Page 4 (audio, EOS) — pre_skip added
-        let seg4 = buf[pos + 27] as usize;
+        // Page 4: first three  packets = 960 + 480 + 960, but this is last packet so we add
+        // pre-skip of 3480 too
+        let seg4 = buf[pos + hdr_len - 1] as usize;
         let p4_start = pos;
-        pos += 28 + seg4;
+        pos += hdr_len + seg4;
         let g4 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
-        assert_eq!(g4, 960 + 480 + 960 + 3840);
+        assert_eq!(g4, 960 + 480 + 960 + pre_skip);
         assert_eq!(buf[pos + 5], 0x04); // EOS
 
         // Serial number should be consistent

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Tomi Leppänen
+ * Copyright (c) 2026 Gekkonid Scientific
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Manual integration test: encode WAV files from tests/testdata/encode/
@@ -16,7 +16,7 @@ use std::{
 };
 
 const PRE_SKIP: u16 = 312;
-const TARGET_BITRATE: u32 = 32_000;
+const TARGET_BITRATE: u32 = 48_000;
 
 const WAV_DIR: &str = "../tests/testdata/encode";
 
