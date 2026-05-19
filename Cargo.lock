@@ -1029,6 +1029,7 @@ version = "0.1.2"
 dependencies = [
  "az",
  "num_enum",
+ "oggopus-embedded",
  "opus-embedded-sys",
 ]
 

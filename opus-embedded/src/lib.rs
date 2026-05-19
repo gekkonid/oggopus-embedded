@@ -973,4 +973,321 @@ mod tests {
             assert!(Channels::try_from(channels).is_err());
         }
     }
+
+    #[cfg(all(feature = "encode", feature = "decode"))]
+    mod external_tests {
+        extern crate std;
+        use super::*;
+        use alloc::vec::Vec;
+
+        fn generate_sine(frequency: f64, sample_rate: i32, amplitude: f64, num_samples: usize) -> Vec<i16> {
+            let nyquist = sample_rate as f64 / 2.0;
+            let freq = if frequency >= nyquist { nyquist * 0.99 } else { frequency };
+            let two_pi = core::f64::consts::PI * 2.0;
+            (0..num_samples)
+                .map(|i| {
+                    let t = i as f64 / sample_rate as f64;
+                    (amplitude * (two_pi * freq * t).sin()) as i16
+                })
+                .collect()
+        }
+
+        fn compute_snr(original: &[i16], decoded: &[i16]) -> f64 {
+            let min_len = original.len().min(decoded.len());
+            if min_len == 0 {
+                return -f64::INFINITY;
+            }
+            let mut sq_err_sum: f64 = 0.0;
+            let mut signal_power: f64 = 0.0;
+            for i in 0..min_len {
+                let err = (original[i] as f64) - (decoded[i] as f64);
+                sq_err_sum += err * err;
+                signal_power += (original[i] as f64) * (original[i] as f64);
+            }
+            let mse = sq_err_sum / min_len as f64;
+            let sp = signal_power / min_len as f64;
+            if mse <= 1e-30 || sp <= 1e-30 {
+                return 100.0;
+            }
+            10.0 * (sp / mse).log10()
+        }
+
+        fn write_ogg_page(
+            writer: &mut oggopus_embedded::prelude::OggWriter,
+            packet: &[u8],
+            samples: u16,
+            is_last: bool,
+            file: &mut std::fs::File,
+            page_buf: &mut [u8],
+        ) {
+            use std::io::Write;
+            let written = writer.write_packet(packet, samples, is_last, page_buf).unwrap();
+            file.write_all(&page_buf[..written]).unwrap();
+        }
+
+        fn decode_with_opusdec(opus_path: &std::path::Path) -> Vec<i16> {
+            let tmp = std::env::temp_dir();
+            let stem = opus_path.file_stem().unwrap().to_string_lossy();
+            let raw_path = tmp.join(std::ffi::OsStr::new(&std::format!("{}.raw", stem)));
+
+            let output = std::process::Command::new("opusdec")
+                .arg("--quiet")
+                .arg(opus_path)
+                .arg(&raw_path)
+                .output()
+                .expect("opusdec not found -- install opus-tools");
+
+            assert!(
+                output.status.success(),
+                "opusdec failed:\nstderr: {}",
+                alloc::string::String::from_utf8_lossy(&output.stderr),
+            );
+
+            let raw_data = std::fs::read(&raw_path).unwrap();
+            let samples: Vec<i16> = raw_data
+                .chunks_exact(2)
+                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+
+            let _ = std::fs::remove_file(&raw_path);
+            samples
+        }
+
+        #[test]
+        fn external_mono_64kbps() {
+            let sample_rate = 48000i32;
+            let frame_size = 960i32;
+            let total_frames = 25;
+            let total_samples = (frame_size * total_frames) as usize;
+            let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
+
+            // Generate a 440 Hz sine wave at half amplitude
+            let pcm = generate_sine(440.0, sample_rate, 0.5 * i16::MAX as f64, total_samples);
+
+            let mut encoder = Encoder::new(
+                SamplingRate::F48k,
+                Channels::Mono,
+                Application::Audio,
+                frame_size,
+            )
+            .unwrap();
+            encoder.set_bitrate(64000).unwrap();
+
+            let mut writer = oggopus_embedded::prelude::OggWriter::new(42, pre_skip);
+
+            let tmp = std::env::temp_dir();
+            let opus_path = tmp.join("external_mono_64kbps.opus");
+
+            {
+                let mut opus_file = std::fs::File::create(&opus_path).unwrap();
+                let mut page_buf = [0u8; 8192];
+
+                let header = oggopus_embedded::opus::OpusHeader {
+                    version: 1,
+                    channels: oggopus_embedded::opus::ChannelMapping::Family0 { channels: 1 },
+                    pre_skip,
+                    sample_rate: sample_rate as u32,
+                    output_gain: 0,
+                };
+                let written = writer.write_header(&header, &mut page_buf).unwrap();
+                use std::io::Write;
+                opus_file.write_all(&page_buf[..written]).unwrap();
+
+                let written = writer
+                    .write_tags("rust-opus-embedded", &[], &mut page_buf)
+                    .unwrap();
+                opus_file.write_all(&page_buf[..written]).unwrap();
+
+                let mut enc_buf = [0u8; 2000];
+                for frame in 0..total_frames {
+                    let start = (frame * frame_size) as usize;
+                    let packet = encoder
+                        .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                        .unwrap();
+                    let is_last = frame == total_frames - 1;
+                    write_ogg_page(&mut writer, packet, frame_size as u16, is_last, &mut opus_file, &mut page_buf);
+                }
+            }
+
+            let decoded_samples = decode_with_opusdec(&opus_path);
+
+            let pcm_after_skip = &pcm[pre_skip as usize..];
+            let decoded_after_skip = &decoded_samples[pre_skip as usize..];
+            let snr = compute_snr(pcm_after_skip, decoded_after_skip);
+            let min_len = pcm_after_skip.len().min(decoded_after_skip.len());
+            let max_error = pcm_after_skip[..min_len]
+                .iter()
+                .zip(decoded_after_skip[..min_len].iter())
+                .map(|(a, b)| (a - b).unsigned_abs() as u32)
+                .max()
+                .unwrap_or(0);
+            let sample_count_diff =
+                (decoded_after_skip.len() as isize - pcm_after_skip.len() as isize).unsigned_abs();
+
+            std::println!(
+                "external_mono_64kbps: SNR={:.1} dB, max_error={}, decoded_after_skip={}, original_after_skip={}, diff={}",
+                snr, max_error, decoded_after_skip.len(), pcm_after_skip.len(), sample_count_diff,
+            );
+
+            assert!(snr > 10.0, "SNR too low: {:.1} dB (expect >10 dB)", snr);
+            assert!(
+                sample_count_diff <= frame_size as usize,
+                "Sample count differs by more than one frame: {} vs {} (diff={})",
+                decoded_samples.len(),
+                pcm_after_skip.len(),
+                sample_count_diff,
+            );
+
+            let _ = std::fs::remove_file(&opus_path);
+        }
+
+        #[test]
+        fn external_mono_silence_no_errors() {
+            let sample_rate = 48000i32;
+            let frame_size = 960i32;
+            let total_frames = 10;
+            let total_samples = (frame_size * total_frames) as usize;
+            let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
+
+            let pcm = alloc::vec![0i16; total_samples];
+
+            let mut encoder = Encoder::new(
+                SamplingRate::F48k,
+                Channels::Mono,
+                Application::Audio,
+                frame_size,
+            )
+            .unwrap();
+            encoder.set_bitrate(32000).unwrap();
+
+            let mut writer = oggopus_embedded::prelude::OggWriter::new(1, pre_skip);
+
+            let tmp = std::env::temp_dir();
+            let opus_path = tmp.join("external_silence.opus");
+
+            {
+                let mut opus_file = std::fs::File::create(&opus_path).unwrap();
+                let mut page_buf = [0u8; 4096];
+
+                let header = oggopus_embedded::opus::OpusHeader {
+                    version: 1,
+                    channels: oggopus_embedded::opus::ChannelMapping::Family0 { channels: 1 },
+                    pre_skip,
+                    sample_rate: sample_rate as u32,
+                    output_gain: 0,
+                };
+                let written = writer.write_header(&header, &mut page_buf).unwrap();
+                use std::io::Write;
+                opus_file.write_all(&page_buf[..written]).unwrap();
+
+                let written = writer.write_tags("test", &[], &mut page_buf).unwrap();
+                opus_file.write_all(&page_buf[..written]).unwrap();
+
+                let mut enc_buf = [0u8; 2000];
+                for frame in 0..total_frames {
+                    let start = (frame * frame_size) as usize;
+                    let packet = encoder
+                        .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                        .unwrap();
+                    let is_last = frame == total_frames - 1;
+                    write_ogg_page(&mut writer, packet, frame_size as u16, is_last, &mut opus_file, &mut page_buf);
+                }
+            }
+
+            let decoded_samples = decode_with_opusdec(&opus_path);
+
+            // opusdec raw output includes pre-skip samples; skip them for comparison.
+            let decoded_after_skip = &decoded_samples[pre_skip as usize..];
+            let max_abs = decoded_after_skip.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+            assert!(
+                max_abs < 100,
+                "Silence decoded with high amplitude: max_abs={}",
+                max_abs
+            );
+
+            let _ = std::fs::remove_file(&opus_path);
+        }
+
+        #[test]
+        fn external_tones_multiple_bitrates() {
+            let sample_rate = 48000i32;
+            let frame_size = 960i32;
+            let total_frames = 20;
+            let total_samples = (frame_size * total_frames) as usize;
+            let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
+
+            let pcm = generate_sine(1000.0, sample_rate, 0.3 * i16::MAX as f64, total_samples);
+
+            for bitrate in &[24000, 48000, 96000] {
+                let mut encoder = Encoder::new(
+                    SamplingRate::F48k,
+                    Channels::Mono,
+                    Application::Audio,
+                    frame_size,
+                )
+                .unwrap();
+                encoder.set_bitrate(*bitrate).unwrap();
+
+                let mut writer = oggopus_embedded::prelude::OggWriter::new(1, pre_skip);
+
+                let tmp = std::env::temp_dir();
+                let opus_path = tmp.join(std::format!("external_{}bps.opus", bitrate));
+
+                {
+                    let mut opus_file = std::fs::File::create(&opus_path).unwrap();
+                    let mut page_buf = [0u8; 8192];
+
+                    let header = oggopus_embedded::opus::OpusHeader {
+                        version: 1,
+                        channels: oggopus_embedded::opus::ChannelMapping::Family0 { channels: 1 },
+                        pre_skip,
+                        sample_rate: sample_rate as u32,
+                        output_gain: 0,
+                    };
+                    let written = writer.write_header(&header, &mut page_buf).unwrap();
+                    use std::io::Write;
+                    opus_file.write_all(&page_buf[..written]).unwrap();
+
+                    let written = writer.write_tags("test", &[], &mut page_buf).unwrap();
+                    opus_file.write_all(&page_buf[..written]).unwrap();
+
+                    let mut enc_buf = [0u8; 2000];
+                    for frame in 0..total_frames {
+                        let start = (frame * frame_size) as usize;
+                        let packet = encoder
+                            .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                            .unwrap();
+                        let is_last = frame == total_frames - 1;
+                        write_ogg_page(
+                            &mut writer,
+                            packet,
+                            frame_size as u16,
+                            is_last,
+                            &mut opus_file,
+                            &mut page_buf,
+                        );
+                    }
+                }
+
+                let decoded_samples = decode_with_opusdec(&opus_path);
+
+                let pcm_after_skip = &pcm[pre_skip as usize..];
+                let decoded_after_skip = &decoded_samples[pre_skip as usize..];
+                let snr = compute_snr(pcm_after_skip, decoded_after_skip);
+
+                std::println!(
+                    "external_{}bps: SNR={:.1} dB, decoded_after_skip={}, pcm_after_skip={}",
+                    bitrate, snr, decoded_after_skip.len(), pcm_after_skip.len()
+                );
+
+                assert!(
+                    snr > 6.0,
+                    "SNR too low at {} bps: {:.1} dB",
+                    bitrate, snr
+                );
+
+                let _ = std::fs::remove_file(&opus_path);
+            }
+        }
+    }
 }
