@@ -32,7 +32,7 @@ pub mod prelude {
     pub use super::Decoder;
 
     #[cfg(feature = "encode")]
-    pub use super::{Application, Encoder};
+    pub use super::{Application, Encoder, FrameSize};
 
     pub use super::{Channels, SamplingRate};
 }
@@ -433,24 +433,43 @@ mod encode {
         Music = OPUS_SIGNAL_MUSIC as i32,
     }
 
+    /// Valid Opus frame sizes in samples per channel at 48 kHz.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
+    #[repr(i32)]
+    pub enum FrameSize {
+        /// 2.5 ms (120 samples at 48 kHz).
+        Ms2_5 = 120,
+        /// 5 ms (240 samples at 48 kHz).
+        Ms5 = 240,
+        /// 10 ms (480 samples at 48 kHz).
+        Ms10 = 480,
+        /// 20 ms (960 samples at 48 kHz).
+        Ms20 = 960,
+        /// 40 ms (1920 samples at 48 kHz).
+        Ms40 = 1920,
+        /// 60 ms (2880 samples at 48 kHz).
+        Ms60 = 2880,
+    }
+
+    impl FrameSize {
+        /// Return the frame size in samples per channel.
+        pub fn samples(self) -> i32 {
+            self.into()
+        }
+    }
+
     /// Opus encoder.
     #[derive(Debug)]
     pub struct Encoder {
         encoder: OpusEncoder,
         channels: Channels,
-        frame_size: i32,
+        frame_size: FrameSize,
     }
 
     impl Encoder {
-        /// Valid Opus frame sizes in samples per channel.
-        pub const VALID_FRAME_SIZES: &'static [i32] = &[120, 240, 480, 960, 1920, 2880];
-
         /**
          * Construct encoder from requested sampling rate, number of channels, application and
          * frame size.
-         *
-         * The frame size is the number of samples per channel per encode call. Valid values are
-         * 120, 240, 480, 960, 1920, 2880 (corresponding to 2.5 – 60 ms at 48 kHz).
          *
          * Returns an error if stereo is requested without the `stereo` feature.
          *
@@ -460,7 +479,7 @@ mod encode {
             freq: SamplingRate,
             channels: Channels,
             application: Application,
-            frame_size: i32,
+            frame_size: FrameSize,
         ) -> Result<Self, EncoderError> {
             if !cfg!(feature = "stereo") && channels == Channels::Stereo {
                 return Err(EncoderError {
@@ -503,7 +522,8 @@ mod encode {
             output: &'out mut [u8],
         ) -> Result<&'out [u8], EncoderError> {
             let ch: i32 = self.channels.channels().into();
-            let expected_input = self.frame_size * ch;
+            let frame_size: i32 = self.frame_size.into();
+            let expected_input = frame_size * ch;
             if input.len() < expected_input as usize {
                 return Err(EncoderError {
                     error_code: OPUS_BAD_ARG,
@@ -517,7 +537,7 @@ mod encode {
                 opus_encode(
                     &mut self.encoder,
                     input_ptr,
-                    self.frame_size,
+                    frame_size,
                     output_ptr,
                     max_data_bytes,
                 )
@@ -531,8 +551,8 @@ mod encode {
             }
         }
 
-        /// Return the frame size in samples per channel.
-        pub fn frame_size(&self) -> i32 {
+        /// Return the frame size.
+        pub fn frame_size(&self) -> FrameSize {
             self.frame_size
         }
 
@@ -696,6 +716,26 @@ mod tests {
     use alloc::string::ToString;
     use core::error::Error;
 
+    fn compute_snr(original: &[i16], decoded: &[i16]) -> f64 {
+        let min_len = original.len().min(decoded.len());
+        if min_len == 0 {
+            return -f64::INFINITY;
+        }
+        let mut sq_err_sum: f64 = 0.0;
+        let mut signal_power: f64 = 0.0;
+        for i in 0..min_len {
+            let err = (original[i] as f64) - (decoded[i] as f64);
+            sq_err_sum += err * err;
+            signal_power += (original[i] as f64) * (original[i] as f64);
+        }
+        let mse = sq_err_sum / min_len as f64;
+        let sp = signal_power / min_len as f64;
+        if mse <= 1e-30 || sp <= 1e-30 {
+            return 100.0;
+        }
+        10.0 * (sp / mse).log10()
+    }
+
     #[cfg(feature = "decode")]
     mod decode_tests {
         use super::*;
@@ -858,7 +898,7 @@ mod tests {
                 SamplingRate::F48k,
                 Channels::Mono,
                 Application::Audio,
-                960,
+                FrameSize::Ms20,
             );
             assert!(encoder.is_ok());
         }
@@ -869,7 +909,7 @@ mod tests {
                 SamplingRate::F48k,
                 Channels::Stereo,
                 Application::Audio,
-                960,
+                FrameSize::Ms20,
             );
             if cfg!(feature = "stereo") {
                 assert!(encoder.is_ok());
@@ -882,11 +922,12 @@ mod tests {
         #[cfg(feature = "decode")]
         #[test]
         fn encode_and_decode_roundtrip() {
+            let lookahead = 312usize; // libopus lookahead at 48 kHz
             let mut encoder = Encoder::new(
                 SamplingRate::F48k,
                 Channels::Mono,
                 Application::Audio,
-                960,
+                FrameSize::Ms20,
             )
             .unwrap();
             let mut decoder = Decoder::new(SamplingRate::F48k, Channels::Mono).unwrap();
@@ -905,6 +946,24 @@ mod tests {
             let mut output = [0i16; 960];
             let decoded = decoder.decode(packet, &mut output).unwrap();
             assert_eq!(decoded.len(), 960);
+
+            // The first decoded samples contain the codec lookahead and should
+            // not be compared directly against the input waveform.
+            let aligned_decoded = &decoded[lookahead..];
+            let aligned_original = &pcm[..aligned_decoded.len()];
+            let max_error = aligned_original
+                .iter()
+                .zip(aligned_decoded.iter())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            let snr = compute_snr(aligned_original, aligned_decoded);
+            assert!(
+                snr > 15.0,
+                "Internal roundtrip SNR too low: {:.1} dB, max_error={}",
+                snr,
+                max_error
+            );
         }
 
         #[test]
@@ -913,10 +972,11 @@ mod tests {
                 SamplingRate::F48k,
                 Channels::Mono,
                 Application::Audio,
-                960,
+                FrameSize::Ms20,
             )
             .unwrap();
             assert!(encoder.set_bitrate(64000).is_ok());
+
             assert!(encoder.set_complexity(5).is_ok());
             assert!(encoder.set_signal(Signal::Auto).is_ok());
             assert!(encoder.set_inband_fec(false).is_ok());
@@ -933,7 +993,7 @@ mod tests {
                 SamplingRate::F48k,
                 Channels::Mono,
                 Application::Audio,
-                960,
+                FrameSize::Ms20,
             )
             .unwrap();
             // Pass a 0-size input to trigger BAD_ARG
@@ -992,25 +1052,6 @@ mod tests {
                 .collect()
         }
 
-        fn compute_snr(original: &[i16], decoded: &[i16]) -> f64 {
-            let min_len = original.len().min(decoded.len());
-            if min_len == 0 {
-                return -f64::INFINITY;
-            }
-            let mut sq_err_sum: f64 = 0.0;
-            let mut signal_power: f64 = 0.0;
-            for i in 0..min_len {
-                let err = (original[i] as f64) - (decoded[i] as f64);
-                sq_err_sum += err * err;
-                signal_power += (original[i] as f64) * (original[i] as f64);
-            }
-            let mse = sq_err_sum / min_len as f64;
-            let sp = signal_power / min_len as f64;
-            if mse <= 1e-30 || sp <= 1e-30 {
-                return 100.0;
-            }
-            10.0 * (sp / mse).log10()
-        }
 
         fn write_ogg_page(
             writer: &mut oggopus_embedded::prelude::OggWriter,
@@ -1028,12 +1069,12 @@ mod tests {
         fn decode_with_opusdec(opus_path: &std::path::Path) -> Vec<i16> {
             let tmp = std::env::temp_dir();
             let stem = opus_path.file_stem().unwrap().to_string_lossy();
-            let raw_path = tmp.join(std::ffi::OsStr::new(&std::format!("{}.raw", stem)));
+            let wav_path = tmp.join(std::ffi::OsStr::new(&std::format!("{}.wav", stem)));
 
             let output = std::process::Command::new("opusdec")
                 .arg("--quiet")
                 .arg(opus_path)
-                .arg(&raw_path)
+                .arg(&wav_path)
                 .output()
                 .expect("opusdec not found -- install opus-tools");
 
@@ -1043,22 +1084,38 @@ mod tests {
                 alloc::string::String::from_utf8_lossy(&output.stderr),
             );
 
-            let raw_data = std::fs::read(&raw_path).unwrap();
-            let samples: Vec<i16> = raw_data
-                .chunks_exact(2)
-                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            let mut reader =
+                hound::WavReader::open(&wav_path).expect("failed to open WAV output from opusdec");
+            let spec = reader.spec();
+            assert_eq!(
+                spec.channels, 1,
+                "expected mono WAV from opusdec"
+            );
+            assert_eq!(
+                spec.sample_format,
+                hound::SampleFormat::Int,
+                "expected 16-bit integer PCM from opusdec"
+            );
+            assert_eq!(
+                spec.bits_per_sample, 16,
+                "expected 16-bit samples from opusdec"
+            );
+            let samples: Vec<i16> = reader
+                .samples::<i16>()
+                .map(|s| s.expect("invalid sample in WAV"))
                 .collect();
 
-            let _ = std::fs::remove_file(&raw_path);
+            let _ = std::fs::remove_file(&wav_path);
             samples
         }
 
         #[test]
         fn external_mono_64kbps() {
             let sample_rate = 48000i32;
-            let frame_size = 960i32;
+            let frame_size = FrameSize::Ms20;
+            let fs = frame_size.samples();
             let total_frames = 25;
-            let total_samples = (frame_size * total_frames) as usize;
+            let total_samples = (fs * total_frames) as usize;
             let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
 
             // Generate a 440 Hz sine wave at half amplitude
@@ -1100,41 +1157,28 @@ mod tests {
 
                 let mut enc_buf = [0u8; 2000];
                 for frame in 0..total_frames {
-                    let start = (frame * frame_size) as usize;
+                    let start = (frame * fs) as usize;
                     let packet = encoder
-                        .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                        .encode(&pcm[start..start + fs as usize], &mut enc_buf)
                         .unwrap();
                     let is_last = frame == total_frames - 1;
-                    write_ogg_page(&mut writer, packet, frame_size as u16, is_last, &mut opus_file, &mut page_buf);
+                    write_ogg_page(&mut writer, packet, fs as u16, is_last, &mut opus_file, &mut page_buf);
                 }
             }
 
             let decoded_samples = decode_with_opusdec(&opus_path);
 
-            let pcm_after_skip = &pcm[pre_skip as usize..];
-            let decoded_after_skip = &decoded_samples[pre_skip as usize..];
-            let snr = compute_snr(pcm_after_skip, decoded_after_skip);
-            let min_len = pcm_after_skip.len().min(decoded_after_skip.len());
-            let max_error = pcm_after_skip[..min_len]
-                .iter()
-                .zip(decoded_after_skip[..min_len].iter())
-                .map(|(a, b)| (a - b).unsigned_abs() as u32)
-                .max()
-                .unwrap_or(0);
-            let sample_count_diff =
-                (decoded_after_skip.len() as isize - pcm_after_skip.len() as isize).unsigned_abs();
-
-            std::println!(
-                "external_mono_64kbps: SNR={:.1} dB, max_error={}, decoded_after_skip={}, original_after_skip={}, diff={}",
-                snr, max_error, decoded_after_skip.len(), pcm_after_skip.len(), sample_count_diff,
-            );
+            // With WAV output, opusdec has already stripped the pre-skip and the
+            // decoded samples align with the start of the original PCM.
+            let snr = compute_snr(&pcm, &decoded_samples);
+            let sample_count_diff = (decoded_samples.len() as isize - pcm.len() as isize).unsigned_abs();
 
             assert!(snr > 10.0, "SNR too low: {:.1} dB (expect >10 dB)", snr);
             assert!(
-                sample_count_diff <= frame_size as usize,
+                sample_count_diff <= fs as usize,
                 "Sample count differs by more than one frame: {} vs {} (diff={})",
                 decoded_samples.len(),
-                pcm_after_skip.len(),
+                pcm.len(),
                 sample_count_diff,
             );
 
@@ -1144,9 +1188,10 @@ mod tests {
         #[test]
         fn external_mono_silence_no_errors() {
             let sample_rate = 48000i32;
-            let frame_size = 960i32;
+            let frame_size = FrameSize::Ms20;
+            let fs = frame_size.samples();
             let total_frames = 10;
-            let total_samples = (frame_size * total_frames) as usize;
+            let total_samples = (fs * total_frames) as usize;
             let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
 
             let pcm = alloc::vec![0i16; total_samples];
@@ -1185,20 +1230,19 @@ mod tests {
 
                 let mut enc_buf = [0u8; 2000];
                 for frame in 0..total_frames {
-                    let start = (frame * frame_size) as usize;
+                    let start = (frame * fs) as usize;
                     let packet = encoder
-                        .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                        .encode(&pcm[start..start + fs as usize], &mut enc_buf)
                         .unwrap();
                     let is_last = frame == total_frames - 1;
-                    write_ogg_page(&mut writer, packet, frame_size as u16, is_last, &mut opus_file, &mut page_buf);
+                    write_ogg_page(&mut writer, packet, fs as u16, is_last, &mut opus_file, &mut page_buf);
                 }
             }
 
             let decoded_samples = decode_with_opusdec(&opus_path);
 
-            // opusdec raw output includes pre-skip samples; skip them for comparison.
-            let decoded_after_skip = &decoded_samples[pre_skip as usize..];
-            let max_abs = decoded_after_skip.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+            // With WAV output opusdec strips pre-skip; check only meaningful samples.
+            let max_abs = decoded_samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
             assert!(
                 max_abs < 100,
                 "Silence decoded with high amplitude: max_abs={}",
@@ -1211,9 +1255,10 @@ mod tests {
         #[test]
         fn external_tones_multiple_bitrates() {
             let sample_rate = 48000i32;
-            let frame_size = 960i32;
+            let frame_size = FrameSize::Ms20;
+            let fs = frame_size.samples();
             let total_frames = 20;
-            let total_samples = (frame_size * total_frames) as usize;
+            let total_samples = (fs * total_frames) as usize;
             let pre_skip: u16 = 312; // libopus lookahead at 48 kHz
 
             let pcm = generate_sine(1000.0, sample_rate, 0.3 * i16::MAX as f64, total_samples);
@@ -1253,15 +1298,15 @@ mod tests {
 
                     let mut enc_buf = [0u8; 2000];
                     for frame in 0..total_frames {
-                        let start = (frame * frame_size) as usize;
+                        let start = (frame * fs) as usize;
                         let packet = encoder
-                            .encode(&pcm[start..start + frame_size as usize], &mut enc_buf)
+                            .encode(&pcm[start..start + fs as usize], &mut enc_buf)
                             .unwrap();
                         let is_last = frame == total_frames - 1;
                         write_ogg_page(
                             &mut writer,
                             packet,
-                            frame_size as u16,
+                            fs as u16,
                             is_last,
                             &mut opus_file,
                             &mut page_buf,
@@ -1271,14 +1316,9 @@ mod tests {
 
                 let decoded_samples = decode_with_opusdec(&opus_path);
 
-                let pcm_after_skip = &pcm[pre_skip as usize..];
-                let decoded_after_skip = &decoded_samples[pre_skip as usize..];
-                let snr = compute_snr(pcm_after_skip, decoded_after_skip);
-
-                std::println!(
-                    "external_{}bps: SNR={:.1} dB, decoded_after_skip={}, pcm_after_skip={}",
-                    bitrate, snr, decoded_after_skip.len(), pcm_after_skip.len()
-                );
+                // WAV output has pre-skip already removed by opusdec, so the
+                // decoded audio aligns with the original PCM from the start.
+                let snr = compute_snr(&pcm, &decoded_samples);
 
                 assert!(
                     snr > 6.0,

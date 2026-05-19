@@ -28,3 +28,4 @@ targets = ["thumbv6m-none-eabi", "x86_64-unknown-linux-gnu"]
 
 [dev-dependencies]
 oggopus-embedded = { path = "../oggopus-embedded", version = "0.1.2", features = ["encode"] }
+hound = "3.5.1"
