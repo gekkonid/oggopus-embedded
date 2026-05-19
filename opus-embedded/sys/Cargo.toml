@@ -10,9 +10,11 @@ edition = "2021"
 rust-version = "1.85.1"
 
 [features]
-default = ["optimize_libopus"]
+default = ["decode", "optimize_libopus"]
 optimize_libopus = []
 stereo = []
+decode = []
+encode = []
 
 [dependencies]
 

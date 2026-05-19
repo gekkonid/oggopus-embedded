@@ -166,8 +166,10 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=opus");
 
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
     let mut builder = bindgen::Builder::default()
-        .header("src/decoder.h")
+        .header("src/bindings.h")
         .allowlist_type("OpusDecoder")
         .allowlist_function("opus_decode")
         .allowlist_function("opus_decoder_get_nb_samples")
@@ -196,17 +198,29 @@ fn main() {
         .clang_arg("-Isrc/opus/silk")
         .derive_default(true)
         .parse_callbacks(Box::new(ParseCallback::new()));
+    if cfg!(feature = "stereo") {
+        builder = builder.clang_arg("-DOPUS_EMBEDDED_SYS_STEREO");
+    }
+    if cfg!(feature = "encode") {
+        builder = builder
+            .allowlist_type("OpusEncoder")
+            .allowlist_function("opus_encode")
+            .allowlist_function("opus_encoder_get_size")
+            .allowlist_function("opus_encoder_init")
+            .allowlist_function("opus_encoder_ctl")
+            .allowlist_var("OPUS_APPLICATION_.*")
+            .allowlist_var("OPUS_AUTO")
+            .allowlist_var("OPUS_BITRATE_MAX")
+            .allowlist_var("OPUS_SET_.*")
+            .allowlist_var("OPUS_SIGNAL_.*")
+            .clang_arg("-DOPUS_EMBEDDED_SYS_ENCODE");
+    }
     if env::var("CARGO_CFG_TARGET_OS").unwrap() != "none" {
         builder = builder
             .allowlist_function("opus_decoder_create")
             .allowlist_function("opus_decoder_destroy");
     }
-    if cfg!(feature = "stereo") {
-        builder = builder.clang_arg("-DOPUS_EMBEDDED_SYS_STEREO");
-    }
     let bindings = builder.generate().expect("Unable to generate bindings");
-
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("opus_decoder_gen.rs"))
         .expect("Couldn't write bindings!");

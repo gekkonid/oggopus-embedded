@@ -3,14 +3,15 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 /*!
- * Minimal bindings for opus decoder.
+ * Minimal bindings for opus decoder and encoder.
  *
  * Focused on no_alloc use on embedded ARM platforms.
  *
  * The documentation is not very well-formatted in places and you might want to look at [Opus
  * documentation instead](https://www.opus-codec.org/docs/html_api/index.html) instead. In
  * particular, the page about [Opus
- * Decoder](https://www.opus-codec.org/docs/html_api/group__opusdecoder.html) may be handy.
+ * Decoder](https://www.opus-codec.org/docs/html_api/group__opusdecoder.html) and [Opus
+ * Encoder](https://www.opus-codec.org/docs/html_api/group__opusencoder.html) may be handy.
  */
 
 #![allow(non_camel_case_types)]
@@ -22,6 +23,9 @@ use core::ffi::{c_char, c_int, CStr};
 
 pub const OPUS_DECODER_SIZE_CH1: usize = 17860;
 pub const OPUS_DECODER_SIZE_CH2: usize = 26580;
+
+pub const OPUS_ENCODER_SIZE_CH1: usize = 24612;
+pub const OPUS_ENCODER_SIZE_CH2: usize = 29356;
 
 include!(concat!(env!("OUT_DIR"), "/opus_decoder_gen.rs"));
 
@@ -61,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_reported_size() {
+    fn check_reported_decoder_size() {
         let size = unsafe { opus_decoder_get_size(1) };
         assert_eq!(size, OPUS_DECODER_SIZE_CH1.try_into().unwrap());
         let size = unsafe { opus_decoder_get_size(2) };
@@ -69,13 +73,35 @@ mod tests {
     }
 
     #[test]
-    fn check_struct_size() {
+    fn check_decoder_struct_size() {
         assert_eq!(
             core::mem::size_of::<OpusDecoder>(),
             if cfg!(feature = "stereo") {
                 OPUS_DECODER_SIZE_CH2
             } else {
                 OPUS_DECODER_SIZE_CH1
+            }
+        );
+    }
+
+    #[cfg(feature = "encode")]
+    #[test]
+    fn check_reported_encoder_size() {
+        let size = unsafe { opus_encoder_get_size(1) };
+        assert_eq!(size, OPUS_ENCODER_SIZE_CH1.try_into().unwrap());
+        let size = unsafe { opus_encoder_get_size(2) };
+        assert_eq!(size, OPUS_ENCODER_SIZE_CH2.try_into().unwrap());
+    }
+
+    #[cfg(feature = "encode")]
+    #[test]
+    fn check_encoder_struct_size() {
+        assert_eq!(
+            core::mem::size_of::<OpusEncoder>(),
+            if cfg!(feature = "stereo") {
+                OPUS_ENCODER_SIZE_CH2
+            } else {
+                OPUS_ENCODER_SIZE_CH1
             }
         );
     }

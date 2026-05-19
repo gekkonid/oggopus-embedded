@@ -10,7 +10,10 @@ edition = "2021"
 rust-version = "1.81.0"
 
 [features]
+default = ["decode"]
 family255 = []
+decode = []
+encode = []
 
 [dependencies]
 bitflags = "2.9"

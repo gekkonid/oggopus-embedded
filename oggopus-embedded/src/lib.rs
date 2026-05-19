@@ -28,6 +28,8 @@
 
 mod container;
 pub mod opus;
+#[cfg(feature = "encode")]
+pub(crate) mod writer;
 
 pub use container::{OggError, Packet, Packets};
 pub use opus::ChannelMapping;
@@ -45,7 +47,11 @@ pub mod prelude {
      * ```
      */
 
+    #[cfg(feature = "decode")]
     pub use super::{Bitstream, ChannelMapping, Either};
+
+    #[cfg(feature = "encode")]
+    pub use crate::writer::{OggWriteError, OggWriter};
 }
 
 /// Error values for formatting.

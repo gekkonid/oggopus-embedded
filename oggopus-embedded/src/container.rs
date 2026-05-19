@@ -163,7 +163,7 @@ struct PageHeader<'data> {
 }
 
 impl PageHeader<'_> {
-    fn parse(input: &[u8]) -> Result<PageHeader<'_>> {
+    fn parse(input: &[u8]) -> Result<'_, PageHeader<'_>> {
         use OggError::*;
         let (input, _) = tag(b"OggS".as_slice())(input)
             .map_err(|_: nom::Err<(&[u8], ErrorKind)>| NotOggStream)?;
@@ -256,7 +256,7 @@ impl Page<'_> {
      * Useful for skipping comment headers. Returns the last page which is useful for validating
      * the stream.
      */
-    pub(crate) fn skip(data: &[u8]) -> Result<'_, Page> {
+    pub(crate) fn skip(data: &[u8]) -> Result<'_, Page<'_>> {
         use OggError::*;
         let (mut remaining, mut page) = Self::parse(data)?;
         let mut page_sequence_number = page.page_sequence_number();

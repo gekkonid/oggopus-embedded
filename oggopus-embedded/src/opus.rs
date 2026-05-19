@@ -328,15 +328,15 @@ pub struct Mapping {
 #[derive(Debug, PartialEq)]
 pub struct ChannelMappingTable<const MAX_CHANNELS: usize> {
     /// The number of total streams encoded in each Ogg packet.
-    stream_count: u8,
+    pub stream_count: u8,
     /// The number of stereo decoders needed.
-    coupled_count: u8,
+    pub coupled_count: u8,
     /// Channel mapping data.
-    mapping: [u8; MAX_CHANNELS],
+    pub mapping: [u8; MAX_CHANNELS],
 }
 
 impl<const MAX_CHANNELS: usize> ChannelMappingTable<MAX_CHANNELS> {
-    fn parse(input: &[u8], channels: u8) -> Result<ChannelMappingTable<MAX_CHANNELS>> {
+    fn parse(input: &[u8], channels: u8) -> Result<'_, ChannelMappingTable<MAX_CHANNELS>> {
         use OpusError::*;
         let (input, stream_count) = number::u8().parse(input)?;
         let (input, coupled_count) = number::u8().parse(input)?;
@@ -400,7 +400,7 @@ impl OpusHeader {
      * May return [`UnsupportedStream`][`OpusError::UnsupportedStream`] if family255 feature has
      * not been enabled and such stream is encountered.
      */
-    pub fn parse(input: &[u8]) -> Result<Self> {
+    pub fn parse(input: &[u8]) -> Result<'_, Self> {
         use OpusError::*;
         let (input, _) = tag(b"OpusHead".as_slice())(input)
             .map_err(|_: nom::Err<(&[u8], ErrorKind)>| NotOpusStream)?;
