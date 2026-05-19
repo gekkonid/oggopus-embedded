@@ -318,7 +318,7 @@ impl OggWriter {
         }
 
         self.granule += samples as u64;
-        let granule = self.pre_skip as u64 + self.granule;
+        let granule = self.granule + if is_last { self.pre_skip as u64 } else { 0 };
 
         let mut flags = 0x00;
         if is_last {
@@ -455,15 +455,15 @@ mod tests {
         assert_eq!(buf[tags_off + 5], 0x00);
         assert_eq!(u32::from_le_bytes(buf[tags_off + 18..tags_off + 22].try_into().unwrap()), 1);
 
-        // Verify audio page 1: granule = pre_skip + 960 = 4800, page_seq = 2
+        // Verify audio page 1: granule = 960 (no pre_skip), page_seq = 2
         let g1 = u64::from_le_bytes(buf[audio1_off + 6..audio1_off + 14].try_into().unwrap());
-        assert_eq!(g1, 3840 + 960);
+        assert_eq!(g1, 960);
         assert_eq!(u32::from_le_bytes(buf[audio1_off + 18..audio1_off + 22].try_into().unwrap()), 2);
         assert_eq!(buf[audio1_off + 5], 0x00);
 
-        // Verify audio page 2: granule = pre_skip + 960 + 960 = 5760, EOS
+        // Verify audio page 2: granule = 960 + 960 + pre_skip = 5760, EOS
         let g2 = u64::from_le_bytes(buf[audio2_off + 6..audio2_off + 14].try_into().unwrap());
-        assert_eq!(g2, 3840 + 960 + 960);
+        assert_eq!(g2, 960 + 960 + 3840);
         assert_eq!(u32::from_le_bytes(buf[audio2_off + 18..audio2_off + 22].try_into().unwrap()), 3);
         assert_eq!(buf[audio2_off + 5], 0x04); // EOS
 
@@ -513,23 +513,23 @@ mod tests {
             let seg = buf[pos + 27] as usize;
             28 + seg
         };
-        // Page 2 (audio)
+        // Page 2 (audio) — no pre_skip
         let g2 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
-        assert_eq!(g2, 3840 + 960);
+        assert_eq!(g2, 960);
 
-        // Page 3 (audio)
+        // Page 3 (audio) — no pre_skip
         let seg3 = buf[pos + 27] as usize;
         let p3_start = pos;
         pos += 28 + seg3;
         let g3 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
-        assert_eq!(g3, 3840 + 960 + 480);
+        assert_eq!(g3, 960 + 480);
 
-        // Page 4 (audio, EOS)
+        // Page 4 (audio, EOS) — pre_skip added
         let seg4 = buf[pos + 27] as usize;
         let p4_start = pos;
         pos += 28 + seg4;
         let g4 = u64::from_le_bytes(buf[pos + 6..pos + 14].try_into().unwrap());
-        assert_eq!(g4, 3840 + 960 + 480 + 960);
+        assert_eq!(g4, 960 + 480 + 960 + 3840);
         assert_eq!(buf[pos + 5], 0x04); // EOS
 
         // Serial number should be consistent

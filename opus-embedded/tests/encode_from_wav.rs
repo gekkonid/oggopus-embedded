@@ -15,6 +15,9 @@ use std::{
     process::Command,
 };
 
+const PRE_SKIP: u16 = 312;
+const TARGET_BITRATE: u32 = 32_000;
+
 const WAV_DIR: &str = "../tests/testdata/encode";
 
 fn wav_dir() -> PathBuf {
@@ -72,7 +75,7 @@ fn encode_embedded(
 
     let mut encoder = Encoder::new(sample_rate, channels, Application::Audio, frame_size)
         .expect("failed to create encoder");
-    encoder.set_bitrate(96000).expect("failed to set bitrate");
+    encoder.set_bitrate(TARGET_BITRATE as i32).expect("failed to set bitrate");
 
     let mut writer = OggWriter::new(42, pre_skip);
 
@@ -132,8 +135,11 @@ fn encode_embedded(
 }
 
 fn encode_opusenc(input: &Path, output: &Path) {
+    let bitrate = TARGET_BITRATE / 1000;
     let cmd_output = Command::new("opusenc")
         .arg("--quiet")
+        .arg("--bitrate")
+        .arg(bitrate.to_string())
         .arg(input)
         .arg(output)
         .output()
@@ -176,18 +182,12 @@ fn decode_with_opusdec(opus_path: &Path) -> Vec<i16> {
     samples
 }
 
-fn check_opusinfo(path: &Path) {
+fn run_opusinfo(path: &Path) -> String {
     let output = Command::new("opusinfo")
         .arg(path)
         .output()
         .expect("opusinfo not found -- install opus-tools");
-    assert!(
-        output.status.success(),
-        "opusinfo failed on {}:\nstdout: {}\nstderr: {}",
-        path.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.trim().is_empty() {
         panic!(
@@ -196,6 +196,160 @@ fn check_opusinfo(path: &Path) {
             stderr
         );
     }
+    assert!(
+        output.status.success(),
+        "opusinfo failed on {}: {}",
+        path.display(),
+        stderr
+    );
+    String::from_utf8(output.stdout).expect("opusinfo output is not valid UTF-8")
+}
+
+fn parse_opusinfo_field<'a>(lines: &[&'a str], prefix: &str) -> Option<&'a str> {
+    for &line in lines {
+        if let Some(value) = line.trim().strip_prefix(prefix) {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+fn parse_duration(s: &str) -> f64 {
+    let s = s.trim().trim_end_matches('s');
+    if let Some((min, rest)) = s.split_once("m:") {
+        let minutes: f64 = min.parse().unwrap_or(0.0);
+        let seconds: f64 = rest.parse().unwrap_or(0.0);
+        minutes * 60.0 + seconds
+    } else {
+        s.parse::<f64>().unwrap_or(0.0)
+    }
+}
+
+fn parse_bitrate(s: &str) -> f64 {
+    let s = s.trim();
+    // "107.6 kbit/s" or "96.41 kbit/s"
+    s.split_whitespace()
+        .next()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+fn validate_opusinfo_output(
+    stdout: &str,
+    stem: &str,
+    label: &str,
+    expected_channels: u16,
+    expected_sample_rate: u32,
+    expected_duration: f64,
+    expect_embedded_encoder: bool,
+) {
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    if expect_embedded_encoder {
+        let encoder =
+            parse_opusinfo_field(&lines, "Encoded with ").expect("missing encoder field");
+        assert_eq!(
+            encoder, "rust-opus-embedded",
+            "{} {}: unexpected encoder",
+            label, stem
+        );
+    } else {
+        let encoder =
+            parse_opusinfo_field(&lines, "Encoded with ").expect("missing encoder field");
+        assert!(
+            encoder.contains("libopus"),
+            "{} {}: expected libopus encoder, got '{}'",
+            label,
+            stem,
+            encoder
+        );
+    }
+
+    let pre_skip_str = parse_opusinfo_field(&lines, "Pre-skip: ").expect("missing pre-skip");
+    let pre_skip: u16 = pre_skip_str.parse().expect("invalid pre-skip value");
+    assert_eq!(
+        pre_skip, PRE_SKIP,
+        "{} {}: expected pre-skip {}, got {}",
+        label, stem, PRE_SKIP, pre_skip
+    );
+
+    let channels_str = parse_opusinfo_field(&lines, "Channels: ").expect("missing channels");
+    let channels: u16 = channels_str.parse().expect("invalid channels value");
+    assert_eq!(
+        channels, expected_channels,
+        "{} {}: expected {} channels, got {}",
+        label, stem, expected_channels, channels
+    );
+
+    let rate_str =
+        parse_opusinfo_field(&lines, "Original sample rate: ").expect("missing sample rate");
+    let rate_str = rate_str.trim_end_matches(" Hz");
+    let rate: u32 = rate_str.parse().expect("invalid sample rate");
+    assert_eq!(
+        rate, expected_sample_rate,
+        "{} {}: expected sample rate {}, got {}",
+        label, stem, expected_sample_rate, rate
+    );
+
+    let packet_dur = parse_opusinfo_field(&lines, "Packet duration: ").expect("missing packet duration");
+    assert!(
+        packet_dur.contains("20.0ms"),
+        "{} {}: expected 20.0ms packet duration, got '{}'",
+        label,
+        stem,
+        packet_dur
+    );
+
+    let playback = parse_opusinfo_field(&lines, "Playback length: ").expect("missing playback length");
+    let playback_secs = parse_duration(playback);
+    let duration_diff = (playback_secs - expected_duration).abs();
+    assert!(
+        duration_diff < 0.01,
+        "{} {}: playback length {:.3}s differs from expected {:.3}s by {:.3}s",
+        label,
+        stem,
+        playback_secs,
+        expected_duration,
+        duration_diff
+    );
+
+    let bitrate_line =
+        parse_opusinfo_field(&lines, "Average bitrate: ").expect("missing bitrate");
+    if let Some(w_o) = bitrate_line.split(',').nth(1) {
+        if let Some(rate_str) = w_o.trim().strip_prefix("w/o overhead: ") {
+            let rate_kbps = parse_bitrate(rate_str);
+            let expected_kbps = TARGET_BITRATE as f64 / 1000.0;
+            let bitrate_ratio = rate_kbps / expected_kbps;
+            assert!(
+                (0.8..=1.2).contains(&bitrate_ratio),
+                "{} {}: bitrate w/o overhead {:.1} kbps too far from target {} kbps",
+                label,
+                stem,
+                rate_kbps,
+                expected_kbps
+            );
+        }
+    }
+}
+
+fn compute_snr(original: &[i16], decoded: &[i16]) -> f64 {
+    let min_len = original.len().min(decoded.len());
+    if min_len == 0 {
+        return -f64::INFINITY;
+    }
+    let mut sq_err_sum: f64 = 0.0;
+    let mut signal_power: f64 = 0.0;
+    for i in 0..min_len {
+        let err = (original[i] as f64) - (decoded[i] as f64);
+        sq_err_sum += err * err;
+        signal_power += (original[i] as f64) * (original[i] as f64);
+    }
+    let mse = sq_err_sum / min_len as f64;
+    let sp = signal_power / min_len as f64;
+    if mse <= 1e-30 || sp <= 1e-30 {
+        return 100.0;
+    }
+    10.0 * (sp / mse).log10()
 }
 
 #[test]
@@ -218,6 +372,9 @@ fn encode_wav_files_with_embedded_and_opusenc() {
         let (spec, samples) = read_wav(wav_path);
 
         let duration = samples.len() as f64 / spec.sample_rate as f64 / spec.channels as f64;
+        let is_direct_rate = opus_embedded::SamplingRate::closest(spec.sample_rate as i32) as u32
+            == spec.sample_rate;
+
         println!(
             "Encoding {} ({} ch, {} Hz, {:.1} s) with embedded encoder -> {}",
             wav_path.display(),
@@ -236,10 +393,28 @@ fn encode_wav_files_with_embedded_and_opusenc() {
         encode_opusenc(wav_path, &opusenc_path);
 
         println!("Checking {} with opusinfo", embedded_path.display());
-        check_opusinfo(&embedded_path);
+        let embedded_info = run_opusinfo(&embedded_path);
+        validate_opusinfo_output(
+            &embedded_info,
+            &stem,
+            "embedded",
+            spec.channels,
+            spec.sample_rate,
+            duration,
+            true,
+        );
 
         println!("Checking {} with opusinfo", opusenc_path.display());
-        check_opusinfo(&opusenc_path);
+        let opusenc_info = run_opusinfo(&opusenc_path);
+        validate_opusinfo_output(
+            &opusenc_info,
+            &stem,
+            "opusenc",
+            spec.channels,
+            spec.sample_rate,
+            duration,
+            false,
+        );
 
         let decoded_embedded = decode_with_opusdec(&embedded_path);
         let decoded_opusenc = decode_with_opusdec(&opusenc_path);
@@ -261,6 +436,54 @@ fn encode_wav_files_with_embedded_and_opusenc() {
 
         assert!(peak_embedded > 0, "embedded {} output is all zeros", stem);
         assert!(peak_opusenc > 0, "opusenc {} output is all zeros", stem);
+
+        if is_direct_rate {
+            let min_len = samples.len().min(decoded_embedded.len().min(decoded_opusenc.len()));
+            if min_len > 0 {
+                let aligned = &samples[..min_len];
+                let snr_embedded =
+                    compute_snr(aligned, &decoded_embedded[..min_len]);
+                let snr_opusenc =
+                    compute_snr(aligned, &decoded_opusenc[..min_len]);
+
+                let sample_diff_embedded =
+                    decoded_embedded.len() as isize - samples.len() as isize;
+                let sample_diff_opusenc =
+                    decoded_opusenc.len() as isize - samples.len() as isize;
+
+                println!(
+                    "{}: embedded {} samples ({} vs source), opusenc {} samples ({} vs source)",
+                    stem,
+                    decoded_embedded.len(),
+                    if sample_diff_embedded >= 0 { format!("+{sample_diff_embedded}") } else { format!("{sample_diff_embedded}") },
+                    decoded_opusenc.len(),
+                    if sample_diff_opusenc >= 0 { format!("+{sample_diff_opusenc}") } else { format!("{sample_diff_opusenc}") },
+                );
+                println!(
+                    "{}: embedded SNR={:.1} dB, opusenc SNR={:.1} dB ({} samples)",
+                    stem, snr_embedded, snr_opusenc, min_len
+                );
+
+                assert!(
+                    snr_embedded > 6.0,
+                    "{}: embedded SNR too low: {:.1} dB",
+                    stem,
+                    snr_embedded
+                );
+                assert!(
+                    snr_opusenc > 6.0,
+                    "{}: opusenc SNR too low: {:.1} dB",
+                    stem,
+                    snr_opusenc
+                );
+            }
+        } else {
+            println!(
+                "{}: sample rate {} Hz differs from Opus rate, skipping SNR check",
+                stem,
+                spec.sample_rate
+            );
+        }
 
         println!("OK: {} (results in {})", stem, dir.display());
     }
