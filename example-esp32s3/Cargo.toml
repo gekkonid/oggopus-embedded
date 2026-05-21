@@ -1,0 +1,18 @@
+[package]
+name = "example-esp32s3"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+esp-backtrace = { version = "0", features = ["esp32s3", "panic-handler", "println"]}
+#esp-backtrace = { version = "0.14", default-features = false, features = ["esp32s3", "exception-handler", "panic-handler", "println"] }
+esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"] }
+esp-println = { version = "0.14", features = ["esp32s3", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
+esp-alloc = "0.5"
+critical-section = "1.2"
+
+
+oggopus-embedded = { path = "../oggopus-embedded" }
+opus-embedded = { path = "../opus-embedded", features = ["decode", "encode", "stereo", "optimize_libopus"] }

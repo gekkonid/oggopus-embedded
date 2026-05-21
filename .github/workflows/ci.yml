@@ -33,3 +33,20 @@ jobs:
 
       - name: Build rp2040 example (compile only)
         run: cargo build -p example-rp2040 --target thumbv6m-none-eabi
+
+  xtensa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust for Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          ldproxy: true
+
+      - name: Build esp32s3 example (compile only)
+        working-directory: example-esp32s3
+        run: cargo build
