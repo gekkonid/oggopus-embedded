@@ -329,6 +329,7 @@ impl OggWriter {
         self.page_seq += 1;
         Ok(result)
     }
+
 }
 
 #[cfg(test)]

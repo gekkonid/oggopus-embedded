@@ -693,6 +693,10 @@ pub enum SamplingRate {
 
 impl SamplingRate {
     /// Creates sampling rate that is the same or higher than the requested value up to 48 kHz.
+    ///
+    /// **Warning**: The returned rate may differ from `value`. You must resample
+    /// your PCM data to match the returned rate before feeding it to [`Encoder`].
+    /// Use [`SamplingRate::try_from`] for an exact match that errors on unsupported rates.
     pub fn closest(value: i32) -> Self {
         use SamplingRate::*;
         if value <= F8k.into() {

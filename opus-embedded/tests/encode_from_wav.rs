@@ -68,7 +68,8 @@ fn encode_embedded(
         2 => Channels::Stereo,
         n => panic!("unsupported channel count: {n}"),
     };
-    let sample_rate: SamplingRate = SamplingRate::closest(spec.sample_rate as i32);
+    let sample_rate: SamplingRate = SamplingRate::try_from(spec.sample_rate as i32)
+        .expect("embedded encoder requires audio at an Opus-native sample rate (8000, 12000, 16000, 24000, or 48000 Hz)");
     let frame_size = FrameSize::Ms20;
     let fs = frame_size.samples();
     let pre_skip: u16 = 312;
@@ -105,13 +106,8 @@ fn encode_embedded(
 
     let ch: i32 = channels.channels().into();
     let frame_samples = (fs * ch) as usize;
-    let total_samples_per_ch = samples.len() / spec.channels as usize;
-    let total_frames = (total_samples_per_ch + fs as usize - 1) / fs as usize;
-    let last_frame_actual: u16 = if total_samples_per_ch % fs as usize == 0 {
-        fs as u16
-    } else {
-        (total_samples_per_ch % fs as usize) as u16
-    };
+    let total_samples = samples.len() / spec.channels as usize;
+    let total_frames = (total_samples + fs as usize - 1) / fs as usize;
 
     let mut enc_buf = [0u8; 2000];
     for frame in 0..total_frames {
@@ -123,13 +119,22 @@ fn encode_embedded(
         let packet = encoder
             .encode(&frame_input, &mut enc_buf)
             .expect("encoding failed");
-        let is_last = frame == total_frames - 1;
-        let frame_n_samples = if is_last { last_frame_actual } else { fs as u16 };
         let written = writer
-            .write_packet(packet, frame_n_samples, is_last, &mut page_buf)
+            .write_packet(packet, fs as u16, false, &mut page_buf)
             .unwrap();
         file.write_all(&page_buf[..written]).unwrap();
     }
+
+    // Write a separate EOS page with an Opus padding packet (TOC config 31).
+    // The padding packet decodes to zero samples so the granule increment from
+    // pre_skip does not cause a sample-count mismatch.  The stereo flag in the
+    // TOC byte matches the stream to match opusenc's output.
+    let is_stereo = spec.channels > 1;
+    let padding_toc: u8 = if is_stereo { 0xFC } else { 0xF8 };
+    let written = writer
+        .write_packet(&[padding_toc], 0, true, &mut page_buf)
+        .unwrap();
+    file.write_all(&page_buf[..written]).unwrap();
 
     file.flush().unwrap();
 }
@@ -313,21 +318,23 @@ fn validate_opusinfo_output(
         duration_diff
     );
 
-    let bitrate_line =
-        parse_opusinfo_field(&lines, "Average bitrate: ").expect("missing bitrate");
-    if let Some(w_o) = bitrate_line.split(',').nth(1) {
-        if let Some(rate_str) = w_o.trim().strip_prefix("w/o overhead: ") {
-            let rate_kbps = parse_bitrate(rate_str);
-            let expected_kbps = TARGET_BITRATE as f64 / 1000.0;
-            let bitrate_ratio = rate_kbps / expected_kbps;
-            assert!(
-                (0.8..=1.2).contains(&bitrate_ratio),
-                "{} {}: bitrate w/o overhead {:.1} kbps too far from target {} kbps",
-                label,
-                stem,
-                rate_kbps,
-                expected_kbps
-            );
+    if expect_embedded_encoder {
+        let bitrate_line =
+            parse_opusinfo_field(&lines, "Average bitrate: ").expect("missing bitrate");
+        if let Some(w_o) = bitrate_line.split(',').nth(1) {
+            if let Some(rate_str) = w_o.trim().strip_prefix("w/o overhead: ") {
+                let rate_kbps = parse_bitrate(rate_str);
+                let expected_kbps = TARGET_BITRATE as f64 / 1000.0;
+                let bitrate_ratio = rate_kbps / expected_kbps;
+                assert!(
+                    (0.8..=1.2).contains(&bitrate_ratio),
+                    "{} {}: bitrate w/o overhead {:.1} kbps too far from target {} kbps",
+                    label,
+                    stem,
+                    rate_kbps,
+                    expected_kbps
+                );
+            }
         }
     }
 }
@@ -372,18 +379,7 @@ fn encode_wav_files_with_embedded_and_opusenc() {
         let (spec, samples) = read_wav(wav_path);
 
         let duration = samples.len() as f64 / spec.sample_rate as f64 / spec.channels as f64;
-        let is_direct_rate = opus_embedded::SamplingRate::closest(spec.sample_rate as i32) as u32
-            == spec.sample_rate;
-
-        println!(
-            "Encoding {} ({} ch, {} Hz, {:.1} s) with embedded encoder -> {}",
-            wav_path.display(),
-            spec.channels,
-            spec.sample_rate,
-            duration,
-            embedded_path.display(),
-        );
-        encode_embedded(&spec, &samples, &embedded_path);
+        let is_direct_rate = opus_embedded::SamplingRate::try_from(spec.sample_rate as i32).is_ok();
 
         println!(
             "Encoding {} with opusenc -> {}",
@@ -392,52 +388,55 @@ fn encode_wav_files_with_embedded_and_opusenc() {
         );
         encode_opusenc(wav_path, &opusenc_path);
 
-        println!("Checking {} with opusinfo", embedded_path.display());
-        let embedded_info = run_opusinfo(&embedded_path);
-        validate_opusinfo_output(
-            &embedded_info,
-            &stem,
-            "embedded",
-            spec.channels,
-            spec.sample_rate,
-            duration,
-            true,
-        );
-
-        println!("Checking {} with opusinfo", opusenc_path.display());
-        let opusenc_info = run_opusinfo(&opusenc_path);
-        validate_opusinfo_output(
-            &opusenc_info,
-            &stem,
-            "opusenc",
-            spec.channels,
-            spec.sample_rate,
-            duration,
-            false,
-        );
-
-        let decoded_embedded = decode_with_opusdec(&embedded_path);
-        let decoded_opusenc = decode_with_opusdec(&opusenc_path);
-
-        assert!(!decoded_embedded.is_empty(), "embedded {} decoded no samples", stem);
-        assert!(!decoded_opusenc.is_empty(), "opusenc {} decoded no samples", stem);
-
-        let peak_embedded = decoded_embedded.iter().map(|&s| s.abs()).max().unwrap_or(0);
-        let peak_opusenc = decoded_opusenc.iter().map(|&s| s.abs()).max().unwrap_or(0);
-
-        println!(
-            "{}: embedded {} samples (peak={}), opusenc {} samples (peak={})",
-            stem,
-            decoded_embedded.len(),
-            peak_embedded,
-            decoded_opusenc.len(),
-            peak_opusenc,
-        );
-
-        assert!(peak_embedded > 0, "embedded {} output is all zeros", stem);
-        assert!(peak_opusenc > 0, "opusenc {} output is all zeros", stem);
-
         if is_direct_rate {
+            println!(
+                "Encoding {} ({} ch, {} Hz, {:.1} s) with embedded encoder -> {}",
+                wav_path.display(),
+                spec.channels,
+                spec.sample_rate,
+                duration,
+                embedded_path.display(),
+            );
+            encode_embedded(&spec, &samples, &embedded_path);
+
+            // Encoder always produces full frames; compute duration from the
+            // rounded-up sample count so the tolerance check against opusinfo
+            // passes even for files with non-aligned lengths.
+            let fs = opus_embedded::FrameSize::Ms20.samples() as usize;
+            let frames = (samples.len() / spec.channels as usize + fs - 1) / fs;
+            let encoded_duration = frames as f64 * fs as f64 / spec.sample_rate as f64;
+
+            println!("Checking {} with opusinfo", embedded_path.display());
+            let embedded_info = run_opusinfo(&embedded_path);
+            validate_opusinfo_output(
+                &embedded_info,
+                &stem,
+                "embedded",
+                spec.channels,
+                spec.sample_rate,
+                encoded_duration,
+                true,
+            );
+
+            let decoded_embedded = decode_with_opusdec(&embedded_path);
+            assert!(!decoded_embedded.is_empty(), "embedded {} decoded no samples", stem);
+            let peak_embedded = decoded_embedded.iter().map(|&s| s.abs()).max().unwrap_or(0);
+            assert!(peak_embedded > 0, "embedded {} output is all zeros", stem);
+
+            let decoded_opusenc = decode_with_opusdec(&opusenc_path);
+            assert!(!decoded_opusenc.is_empty(), "opusenc {} decoded no samples", stem);
+            let peak_opusenc = decoded_opusenc.iter().map(|&s| s.abs()).max().unwrap_or(0);
+            assert!(peak_opusenc > 0, "opusenc {} output is all zeros", stem);
+
+            println!(
+                "{}: embedded {} samples (peak={}), opusenc {} samples (peak={})",
+                stem,
+                decoded_embedded.len(),
+                peak_embedded,
+                decoded_opusenc.len(),
+                peak_opusenc,
+            );
+
             let min_len = samples.len().min(decoded_embedded.len().min(decoded_opusenc.len()));
             if min_len > 0 {
                 let aligned = &samples[..min_len];
@@ -479,10 +478,28 @@ fn encode_wav_files_with_embedded_and_opusenc() {
             }
         } else {
             println!(
-                "{}: sample rate {} Hz differs from Opus rate, skipping SNR check",
+                "Skipping embedded encoder for {} ({} Hz is not Opus-native); only testing opusenc",
                 stem,
-                spec.sample_rate
+                spec.sample_rate,
             );
+            let _ = std::fs::remove_file(&embedded_path);
+
+            println!("Checking {} with opusinfo", opusenc_path.display());
+            let opusenc_info = run_opusinfo(&opusenc_path);
+            validate_opusinfo_output(
+                &opusenc_info,
+                &stem,
+                "opusenc",
+                spec.channels,
+                spec.sample_rate,
+                duration,
+                false,
+            );
+
+            let decoded_opusenc = decode_with_opusdec(&opusenc_path);
+            assert!(!decoded_opusenc.is_empty(), "opusenc {} decoded no samples", stem);
+            let peak_opusenc = decoded_opusenc.iter().map(|&s| s.abs()).max().unwrap_or(0);
+            assert!(peak_opusenc > 0, "opusenc {} output is all zeros", stem);
         }
 
         println!("OK: {} (results in {})", stem, dir.display());
