@@ -9,6 +9,7 @@ use core::f64::consts::PI;
 use esp_backtrace as _;
 use esp_hal::main;
 use esp_println::println;
+use libm::{log10, sin};
 use oggopus_embedded::{
     opus::{ChannelMapping, OpusHeader},
     prelude::*,
@@ -16,28 +17,27 @@ use oggopus_embedded::{
 };
 use opus_embedded::prelude::*;
 
-esp_alloc::heap_allocator!(300 * 1024);
-
 const SAMPLE_RATE: SamplingRate = SamplingRate::F48k;
 const CHANNELS: Channels = Channels::Mono;
 const FRAME_SIZE: FrameSize = FrameSize::Ms20;
 const BITRATE: i32 = 48_000;
 const PRE_SKIP: u16 = 312;
-const FS: usize = FRAME_SIZE.samples() as usize;
 const TOTAL_FRAMES: usize = 100;
-const TOTAL_SAMPLES: usize = FS * TOTAL_FRAMES;
+const TOTAL_SAMPLES: usize = 960 * TOTAL_FRAMES;
 
 #[main]
 fn main() -> ! {
     esp_hal::init(esp_hal::Config::default());
-    esp_println::init();
+    esp_alloc::heap_allocator!(300 * 1024);
     println!("Encode/decode roundtrip on ESP32-S3 starting");
+
+    let fs = FRAME_SIZE.samples() as usize;
 
     // 1. Generate 440 Hz sine wave
     let mut pcm = Vec::with_capacity(TOTAL_SAMPLES);
     for i in 0..TOTAL_SAMPLES {
         let t = i as f64 / 48_000.0;
-        let sample = (i16::MAX as f64 * (2.0 * PI * 440.0 * t).sin()) as i16;
+        let sample = (i16::MAX as f64 * sin(2.0 * PI * 440.0 * t)) as i16;
         pcm.push(sample);
     }
     println!("Generated {} PCM samples", pcm.len());
@@ -71,12 +71,12 @@ fn main() -> ! {
     // Audio frames (same pattern as integration test: is_last=false on all audio packets)
     let mut enc_buf = [0u8; 2000];
     for frame in 0..TOTAL_FRAMES {
-        let start = frame * FS;
+        let start = frame * fs;
         let packet = encoder
-            .encode(&pcm[start..start + FS], &mut enc_buf)
+            .encode(&pcm[start..start + fs], &mut enc_buf)
             .expect("encoding failed");
         let n = writer
-            .write_packet(packet, FS as u16, false, &mut page_buf)
+            .write_packet(packet, fs as u16, false, &mut page_buf)
             .unwrap();
         ogg.extend_from_slice(&page_buf[..n]);
     }
@@ -155,7 +155,7 @@ fn main() -> ! {
 
     for i in 0..min_len {
         let t = i as f64 / 48_000.0;
-        let original = (i16::MAX as f64 * (2.0 * PI * 440.0 * t).sin()) as f64;
+        let original = (i16::MAX as f64 * sin(2.0 * PI * 440.0 * t)) as f64;
         let decoded_sample = decoded_trimmed[i] as f64;
         let err = original - decoded_sample;
         sq_err_sum += err * err;
@@ -165,7 +165,7 @@ fn main() -> ! {
     let mse = sq_err_sum / min_len as f64;
     let sp = signal_power / min_len as f64;
     let snr = if mse > 1e-30 && sp > 1e-30 {
-        10.0 * (sp / mse).log10()
+        10.0 * log10(sp / mse)
     } else {
         100.0
     };

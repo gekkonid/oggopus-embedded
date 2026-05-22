@@ -152,7 +152,8 @@ fn main() {
         builder
             .cflag("-mlongcalls")
             .env("CC", format!("{}-gcc", compiler_prefix))
-            .cflag("-fno-schedule-insns") /* enabling schedule-insns causes audio artifacts */;
+            .cflag("-fno-schedule-insns") /* enabling schedule-insns causes audio artifacts */
+            .config_option("host", Some(&compiler_prefix));
     }
 
     if override_optimization {

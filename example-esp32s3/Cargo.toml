@@ -12,7 +12,12 @@ esp-println = { version = "0.14", features = ["esp32s3", "log-04"] }
 esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
 esp-alloc = "0.5"
 critical-section = "1.2"
+libm = "0.2"
 
-
-oggopus-embedded = { path = "../oggopus-embedded" }
+oggopus-embedded = { path = "../oggopus-embedded", features = ["decode", "encode"] }
 opus-embedded = { path = "../opus-embedded", features = ["decode", "encode", "stereo", "optimize_libopus"] }
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "xtensa-esp32s3-none-elf"
+targets = ["xtensa-esp32s3-none-elf"]
