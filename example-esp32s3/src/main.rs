@@ -25,10 +25,13 @@ const PRE_SKIP: u16 = 312;
 const TOTAL_FRAMES: usize = 100;
 const TOTAL_SAMPLES: usize = 960 * TOTAL_FRAMES;
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 #[main]
 fn main() -> ! {
-    esp_hal::init(esp_hal::Config::default());
-    esp_alloc::heap_allocator!(300 * 1024);
+    let peripherals = esp_hal::init(esp_hal::Config::default());
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+    println!("PSRAM allocator initialized");
     println!("Encode/decode roundtrip on ESP32-S3 starting");
 
     let fs = FRAME_SIZE.samples() as usize;

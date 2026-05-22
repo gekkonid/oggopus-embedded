@@ -16,7 +16,7 @@ decode = []
 encode = []
 
 [dependencies]
-bitflags = "2.9"
+bitflags = "2"
 nom = { version = "8", default-features = false }
 
 [package.metadata.docs.rs]

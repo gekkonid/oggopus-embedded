@@ -19,10 +19,10 @@ encode = []
 [dependencies]
 
 [build-dependencies]
-autotools = "0.2.7"
-bindgen = "0.71.1"
-doxygen-bindgen = "0.1.3"
-regex = "1.11.1"
+autotools = "0.2"
+bindgen = "0.71"
+doxygen-bindgen = "0.1"
+regex = "1"
 
 [package.metadata.docs.rs]
 all-features = true

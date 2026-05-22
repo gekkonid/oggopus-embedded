@@ -7,10 +7,10 @@ publish = false
 [dependencies]
 esp-backtrace = { version = "0", features = ["esp32s3", "panic-handler", "println"]}
 #esp-backtrace = { version = "0.14", default-features = false, features = ["esp32s3", "exception-handler", "panic-handler", "println"] }
-esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "1.1.1", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.14", features = ["esp32s3", "log-04"] }
-esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
-esp-alloc = "0.5"
+esp-bootloader-esp-idf = { version = "0.5", features = ["esp32s3"] }
+esp-alloc = "0.10"
 critical-section = "1.2"
 libm = "0.2"
 

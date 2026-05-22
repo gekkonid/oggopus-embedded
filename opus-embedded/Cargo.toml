@@ -17,9 +17,9 @@ decode = ["opus-embedded-sys/decode"]
 encode = ["opus-embedded-sys/encode"]
 
 [dependencies]
-az = "1.2.1"
+az = "1"
 num_enum = { version = "0.7", default-features = false }
-opus-embedded-sys = { path = "sys", version = "0.1.2", default-features = false }
+opus-embedded-sys = { path = "sys", version = "*", default-features = false }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -27,5 +27,5 @@ default-target = "thumbv6m-none-eabi"
 targets = ["thumbv6m-none-eabi", "x86_64-unknown-linux-gnu"]
 
 [dev-dependencies]
-oggopus-embedded = { path = "../oggopus-embedded", version = "0.1.2", features = ["encode"] }
-hound = "3.5.1"
+oggopus-embedded = { path = "../oggopus-embedded", version = "*", features = ["encode"] }
+hound = "3"

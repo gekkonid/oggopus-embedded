@@ -13,8 +13,8 @@ default-to-48khz = []
 
 [dependencies]
 cortex-m-rt = "0.7.5"
-defmt = "1.0.1"
-defmt-rtt = "1.0.0"
+defmt = "1.1.0"
+defmt-rtt = "1.2.0"
 embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "defmt", "executor-thread", "executor-interrupt", "task-arena-size-32768"] }
 embassy-rp = { version = "0.4.0", features = ["critical-section-impl", "defmt", "rp2040", "time-driver"] }
 embassy-time = "0.4.0"
@@ -23,9 +23,9 @@ numtoa = "0.2.4"
 oggopus-embedded = { path = "../oggopus-embedded", version = "0.1.2" }
 opus-embedded = { path = "../opus-embedded", version = "0.1.2", features = ["decode", "encode", "stereo"] }
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
-portable-atomic = { version = "1.11.0", features = ["critical-section"] }
-static_cell = "2.1.0"
-tinyvec = "1.9.0"
+portable-atomic = { version = "1.13.1", features = ["critical-section"] }
+static_cell = "2.1.1"
+tinyvec = "1.11.0"
 
 [package.metadata.docs.rs]
 all-features = true
