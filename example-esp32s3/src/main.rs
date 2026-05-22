@@ -30,7 +30,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+    let psram_config = esp_hal::psram::PsramConfig {
+        mode: esp_hal::psram::PsramMode::OctalSpi,
+        ..Default::default()
+    };
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
     println!("PSRAM allocator initialized");
     println!("Encode/decode roundtrip on ESP32-S3 starting");
 

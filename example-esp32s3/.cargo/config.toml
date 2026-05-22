@@ -8,7 +8,6 @@ target = "xtensa-esp32s3-none-elf"
 runner = "espflash flash --monitor"
 
 [env]
-ESP_HAL_CONFIG_PSRAM_MODE = "octal"
 
 [unstable]
 build-std = ["core", "alloc"]
