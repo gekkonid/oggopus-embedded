@@ -184,6 +184,7 @@ fn main() -> ! {
     } else {
         println!("FAIL: SNR ({:.2} dB) below 6 dB threshold", snr);
     }
+    println!("All Done!");
 
     loop {}
 }
